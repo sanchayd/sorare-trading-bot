@@ -1,0 +1,58 @@
+# Compiled class files
+*.class
+
+# Log files
+*.log
+
+# BlueJ files
+*.ctxt
+
+# Mobile Tools for Java (J2ME)
+.mtj.tmp/
+
+# Package Files
+*.jar
+*.war
+*.nar
+*.ear
+*.zip
+*.tar.gz
+*.rar
+
+# virtual machine crash logs
+hs_err_pid*
+
+# IDE-specific files
+.idea/
+*.iml
+.vscode/
+*.sublime-workspace
+*.sublime-project
+.classpath
+.project
+.settings/
+
+# Maven
+target/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+.mvn/timing.properties
+
+# Database files
+*.db
+*.db-journal
+
+# Config files with secrets
+config.properties
+
+# Ethereum wallet files
+keystore/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
