@@ -4,6 +4,8 @@ import com.sorarebot.api.SorareApiClient;
 import com.sorarebot.model.Card;
 import com.sorarebot.model.Offer;
 import com.sorarebot.model.Player;
+import com.sorarebot.notification.NotificationService;
+import com.sorarebot.persistence.CardPreferenceRepository;
 import com.sorarebot.persistence.TransactionRepository;
 import com.sorarebot.persistence.WatchlistRepository;
 
@@ -31,16 +33,22 @@ public class TradingEngine {
     private final SorareApiClient apiClient;
     private final WatchlistRepository watchlistRepo;
     private final TransactionRepository transactionRepo;
+    private final CardPreferenceRepository cardPreferenceRepo;
+    private final NotificationService notificationService;
     private final ScheduledExecutorService scheduler;
     private final PriceEvaluator priceEvaluator;
     
     public TradingEngine(
             SorareApiClient apiClient, 
             WatchlistRepository watchlistRepo,
-            TransactionRepository transactionRepo) {
+            TransactionRepository transactionRepo,
+            CardPreferenceRepository cardPreferenceRepo,
+            NotificationService notificationService) {
         this.apiClient = apiClient;
         this.watchlistRepo = watchlistRepo;
         this.transactionRepo = transactionRepo;
+        this.cardPreferenceRepo = cardPreferenceRepo;
+        this.notificationService = notificationService;
         this.scheduler = Executors.newScheduledThreadPool(2);
         this.priceEvaluator = new PriceEvaluator();
     }
@@ -110,6 +118,9 @@ public class TradingEngine {
         // Get the card's price
         BigDecimal cardPrice = card.getPrice();
         
+        // First, check if this is a special card
+        checkForSpecialCard(card);
+        
         // Check if the card is significantly undervalued
         if (priceEvaluator.isUndervalued(cardPrice, floorPrice)) {
             try {
@@ -134,6 +145,28 @@ public class TradingEngine {
             } catch (IOException e) {
                 LOGGER.log(Level.SEVERE, "Error trading card: " + card.getId(), e);
             }
+        }
+    }
+    
+    /**
+     * Check if a card matches any special criteria (jersey mint or favorite serial).
+     * 
+     * @param card The card to check
+     */
+    private void checkForSpecialCard(Card card) {
+        // Check for jersey mint
+        if (cardPreferenceRepo.isJerseyMintEnabled() && card.isJerseyMint()) {
+            // Check if there's a price limit
+            Double maxPrice = cardPreferenceRepo.getJerseyMintMaxPrice();
+            if (maxPrice == null || card.getPrice().compareTo(BigDecimal.valueOf(maxPrice)) <= 0) {
+                notificationService.notifySpecialCard(card, "Jersey mint - " + card.getPlayerJerseyNumber());
+            }
+        }
+        
+        // Check for favorite serial number
+        Set<Integer> favoriteSerials = cardPreferenceRepo.getFavoriteSerials();
+        if (favoriteSerials.contains(card.getSerial())) {
+            notificationService.notifySpecialCard(card, "Favorite serial number - " + card.getSerialString());
         }
     }
     

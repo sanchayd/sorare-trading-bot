@@ -3,6 +3,8 @@ package com.sorarebot;
 import com.sorarebot.api.SorareApiClient;
 import com.sorarebot.blockchain.BlockchainService;
 import com.sorarebot.model.Player;
+import com.sorarebot.notification.NotificationService;
+import com.sorarebot.persistence.CardPreferenceRepository;
 import com.sorarebot.persistence.TransactionRepository;
 import com.sorarebot.persistence.WatchlistRepository;
 import com.sorarebot.trading.TradingEngine;
@@ -32,6 +34,8 @@ public class SorareTradingBot {
     private final TradingEngine tradingEngine;
     private final WatchlistRepository watchlistRepo;
     private final TransactionRepository transactionRepo;
+    private final CardPreferenceRepository cardPreferenceRepo;
+    private final NotificationService notificationService;
     
     public SorareTradingBot(Properties config) throws Exception {
         // Load Ethereum credentials
@@ -50,8 +54,21 @@ public class SorareTradingBot {
         String dbPath = config.getProperty("db.path", "./sorarebot.db");
         this.watchlistRepo = new WatchlistRepository(dbPath);
         this.transactionRepo = new TransactionRepository(dbPath);
+        this.cardPreferenceRepo = new CardPreferenceRepository(dbPath);
         
-        this.tradingEngine = new TradingEngine(apiClient, watchlistRepo, transactionRepo);
+        // Initialize notification service
+        String emailAddress = config.getProperty("notification.email");
+        String smtpHost = config.getProperty("notification.smtp.host");
+        String smtpPort = config.getProperty("notification.smtp.port");
+        String smtpUsername = config.getProperty("notification.smtp.username");
+        String smtpPassword = config.getProperty("notification.smtp.password");
+        boolean enabledEmail = Boolean.parseBoolean(config.getProperty("notification.email.enabled", "false"));
+        
+        this.notificationService = new NotificationService(
+                emailAddress, smtpHost, smtpPort, smtpUsername, smtpPassword, enabledEmail);
+        
+        this.tradingEngine = new TradingEngine(
+                apiClient, watchlistRepo, transactionRepo, cardPreferenceRepo, notificationService);
     }
     
     /**
@@ -85,7 +102,17 @@ public class SorareTradingBot {
         boolean running = true;
         
         System.out.println("Sorare Trading Bot");
-        System.out.println("Commands: add <player_id> <rarity>, remove <player_id>, list, balance, quit");
+        System.out.println("Commands:");
+        System.out.println("  add <player_id> <rarity>        - Add player to watchlist");
+        System.out.println("  remove <player_id>              - Remove player from watchlist");
+        System.out.println("  list                           - List watched players");
+        System.out.println("  balance                        - Show ETH balance");
+        System.out.println("  serial add <number> [rarity]    - Add favorite serial number");
+        System.out.println("  serial remove <number> [rarity] - Remove favorite serial number");
+        System.out.println("  serial list                    - List favorite serial numbers");
+        System.out.println("  jersey on|off                  - Enable/disable jersey mint notifications");
+        System.out.println("  jersey price <eth_amount>      - Set max price for jersey mints (0 for no limit)");
+        System.out.println("  quit                           - Exit the program");
         
         while (running) {
             System.out.print("> ");
@@ -134,6 +161,102 @@ public class SorareTradingBot {
                     case "transactions":
                         System.out.println("Recent transactions:");
                         transactionRepo.getRecentTransactions(10).forEach(System.out::println);
+                        break;
+                    
+                    case "serial":
+                        if (parts.length >= 2) {
+                            switch (parts[1].toLowerCase()) {
+                                case "add":
+                                    if (parts.length >= 3) {
+                                        try {
+                                            int serialNumber = Integer.parseInt(parts[2]);
+                                            String rarity = parts.length >= 4 ? parts[3] : null;
+                                            cardPreferenceRepo.addFavoriteSerial(serialNumber, rarity);
+                                            System.out.println("Added favorite serial number: " + serialNumber + 
+                                                            (rarity != null ? " (Rarity: " + rarity + ")" : ""));
+                                        } catch (NumberFormatException e) {
+                                            System.out.println("Invalid serial number: " + parts[2]);
+                                        }
+                                    } else {
+                                        System.out.println("Usage: serial add <number> [rarity]");
+                                    }
+                                    break;
+                                    
+                                case "remove":
+                                    if (parts.length >= 3) {
+                                        try {
+                                            int serialNumber = Integer.parseInt(parts[2]);
+                                            String rarity = parts.length >= 4 ? parts[3] : null;
+                                            cardPreferenceRepo.removeFavoriteSerial(serialNumber, rarity);
+                                            System.out.println("Removed favorite serial number: " + serialNumber);
+                                        } catch (NumberFormatException e) {
+                                            System.out.println("Invalid serial number: " + parts[2]);
+                                        }
+                                    } else {
+                                        System.out.println("Usage: serial remove <number> [rarity]");
+                                    }
+                                    break;
+                                    
+                                case "list":
+                                    System.out.println("Favorite serial numbers:");
+                                    cardPreferenceRepo.getFavoriteSerials().forEach(serial -> 
+                                        System.out.println("  " + serial));
+                                    break;
+                                    
+                                default:
+                                    System.out.println("Unknown serial command: " + parts[1]);
+                                    System.out.println("Valid commands: serial add, serial remove, serial list");
+                            }
+                        } else {
+                            System.out.println("Usage: serial add|remove|list ...");
+                        }
+                        break;
+                        
+                    case "jersey":
+                        if (parts.length >= 2) {
+                            switch (parts[1].toLowerCase()) {
+                                case "on":
+                                    cardPreferenceRepo.setJerseyMintEnabled(true);
+                                    System.out.println("Jersey mint notifications enabled");
+                                    break;
+                                    
+                                case "off":
+                                    cardPreferenceRepo.setJerseyMintEnabled(false);
+                                    System.out.println("Jersey mint notifications disabled");
+                                    break;
+                                    
+                                case "price":
+                                    if (parts.length >= 3) {
+                                        try {
+                                            double price = Double.parseDouble(parts[2]);
+                                            if (price <= 0) {
+                                                cardPreferenceRepo.setJerseyMintMaxPrice(null);
+                                                System.out.println("Jersey mint max price: no limit");
+                                            } else {
+                                                cardPreferenceRepo.setJerseyMintMaxPrice(price);
+                                                System.out.println("Jersey mint max price set to: " + price + " ETH");
+                                            }
+                                        } catch (NumberFormatException e) {
+                                            System.out.println("Invalid price: " + parts[2]);
+                                        }
+                                    } else {
+                                        Double currentPrice = cardPreferenceRepo.getJerseyMintMaxPrice();
+                                        System.out.println("Current jersey mint max price: " + 
+                                                         (currentPrice != null ? currentPrice + " ETH" : "no limit"));
+                                    }
+                                    break;
+                                    
+                                default:
+                                    System.out.println("Unknown jersey command: " + parts[1]);
+                                    System.out.println("Valid commands: jersey on, jersey off, jersey price");
+                            }
+                        } else {
+                            boolean enabled = cardPreferenceRepo.isJerseyMintEnabled();
+                            Double maxPrice = cardPreferenceRepo.getJerseyMintMaxPrice();
+                            System.out.println("Jersey mint notifications: " + (enabled ? "enabled" : "disabled"));
+                            System.out.println("Jersey mint max price: " + 
+                                             (maxPrice != null ? maxPrice + " ETH" : "no limit"));
+                        }
                         break;
                         
                     case "quit":
