@@ -12,14 +12,18 @@ import com.sorarebot.persistence.WatchlistRepository;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.Queue;
+
 
 /**
  * Core trading engine that implements the trading strategy.
@@ -29,6 +33,9 @@ public class TradingEngine {
     private static final Logger LOGGER = Logger.getLogger(TradingEngine.class.getName());
     private static final BigDecimal MARKUP_PERCENTAGE = new BigDecimal("1.05"); // 5% markup
     private static final BigDecimal MAX_COUNTER_OFFER_DISCOUNT = new BigDecimal("0.95"); // 5% discount for counter offers
+    private final Queue<Instant> recentTransactions = new ConcurrentLinkedQueue<>();
+    private final int maxTransactionsPerHour;
+    private static final Duration TRANSACTION_WINDOW = Duration.ofHours(1);
     
     private final SorareApiClient apiClient;
     private final WatchlistRepository watchlistRepo;
@@ -39,19 +46,21 @@ public class TradingEngine {
     private final PriceEvaluator priceEvaluator;
     
     public TradingEngine(
-            SorareApiClient apiClient, 
-            WatchlistRepository watchlistRepo,
-            TransactionRepository transactionRepo,
-            CardPreferenceRepository cardPreferenceRepo,
-            NotificationService notificationService) {
-        this.apiClient = apiClient;
-        this.watchlistRepo = watchlistRepo;
-        this.transactionRepo = transactionRepo;
-        this.cardPreferenceRepo = cardPreferenceRepo;
-        this.notificationService = notificationService;
-        this.scheduler = Executors.newScheduledThreadPool(2);
-        this.priceEvaluator = new PriceEvaluator();
-    }
+        SorareApiClient apiClient, 
+        WatchlistRepository watchlistRepo,
+        TransactionRepository transactionRepo,
+        CardPreferenceRepository cardPreferenceRepo,
+        NotificationService notificationService,
+        int maxTransactionsPerHour) {
+    this.apiClient = apiClient;
+    this.watchlistRepo = watchlistRepo;
+    this.transactionRepo = transactionRepo;
+    this.cardPreferenceRepo = cardPreferenceRepo;
+    this.notificationService = notificationService;
+    this.scheduler = Executors.newScheduledThreadPool(2);
+    this.priceEvaluator = new PriceEvaluator();
+    this.maxTransactionsPerHour = maxTransactionsPerHour;
+}
     
     /**
      * Start the trading engine.
@@ -107,6 +116,30 @@ public class TradingEngine {
             }
         }
     }
+
+    // Add this method to check transaction rate limits
+    private boolean canExecuteTransaction() {
+        Instant oneHourAgo = Instant.now().minus(TRANSACTION_WINDOW);
+    
+        // Remove transactions older than one hour
+        while (!recentTransactions.isEmpty() && recentTransactions.peek().isBefore(oneHourAgo)) {
+        recentTransactions.poll();
+        }
+    
+        // Check if we're under the limit
+        if (recentTransactions.size() < maxTransactionsPerHour) {
+        return true;
+        }
+    
+        LOGGER.warning("Transaction rate limit reached: " + maxTransactionsPerHour + 
+                   " transactions in the last hour. Skipping transaction.");
+        return false;
+}
+
+        // Add this method to track executed transactions
+        private void recordTransactionExecution() {
+            recentTransactions.add(Instant.now());
+}
     
     /**
      * Evaluate a card and execute a trade if it meets criteria.
@@ -115,22 +148,33 @@ public class TradingEngine {
      * @param floorPrice The current floor price for this player/rarity
      */
     private void evaluateAndTrade(Card card, BigDecimal floorPrice) {
+        // Check if this is a special card
+        checkForSpecialCard(card);
+        
         // Get the card's price
         BigDecimal cardPrice = card.getPrice();
         
-        // First, check if this is a special card
-        checkForSpecialCard(card);
-        
         // Check if the card is significantly undervalued
         if (priceEvaluator.isUndervalued(cardPrice, floorPrice)) {
+            // First check if we're within rate limits
+            if (!canExecuteTransaction()) {
+                LOGGER.info("Skipping potentially undervalued card due to rate limit: " + 
+                           card.getId() + " - Price: " + cardPrice + " ETH, Floor: " + floorPrice + " ETH");
+                return;
+            }
+            
             try {
-                LOGGER.info("Found undervalued card: " + card.getId() + " - Price: " + cardPrice + " ETH, Floor: " + floorPrice + " ETH");
+                LOGGER.info("Found undervalued card: " + card.getId() + " - Price: " + cardPrice + 
+                           " ETH, Floor: " + floorPrice + " ETH");
                 
                 // Buy the card
                 String txHash = apiClient.submitBuyOffer(card.getId(), cardPrice);
                 LOGGER.info("Bought card: " + card.getId() + " - Transaction: " + txHash);
                 
-                // Record the transaction
+                // Record the transaction execution for rate limiting
+                recordTransactionExecution();
+                
+                // Record the transaction in the database
                 transactionRepo.recordPurchase(card.getId(), cardPrice, txHash);
                 
                 // Calculate selling price with 5% markup
@@ -138,7 +182,8 @@ public class TradingEngine {
                 
                 // List the card for sale
                 String listingId = apiClient.listCardForSale(card.getId(), sellingPrice);
-                LOGGER.info("Listed card for sale: " + card.getId() + " - Listing ID: " + listingId + " - Price: " + sellingPrice + " ETH");
+                LOGGER.info("Listed card for sale: " + card.getId() + " - Listing ID: " + 
+                           listingId + " - Price: " + sellingPrice + " ETH");
                 
                 // Record the listing
                 transactionRepo.recordListing(card.getId(), sellingPrice, listingId);

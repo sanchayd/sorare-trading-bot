@@ -66,9 +66,15 @@ public class SorareTradingBot {
         
         this.notificationService = new NotificationService(
                 emailAddress, smtpHost, smtpPort, smtpUsername, smtpPassword, enabledEmail);
-        
-        this.tradingEngine = new TradingEngine(
-                apiClient, watchlistRepo, transactionRepo, cardPreferenceRepo, notificationService);
+
+    // Get transaction rate limit from config
+    int maxTransactionsPerHour = Integer.parseInt(config.getProperty("trading.max.transactions.per.hour", "5"));
+    LOGGER.info("Transaction rate limit: " + maxTransactionsPerHour + " per hour");
+
+
+        // Update the TradingEngine instantiation
+        this.tradingEngine = new TradingEngine(apiClient, watchlistRepo, transactionRepo, cardPreferenceRepo, 
+        notificationService,maxTransactionsPerHour);
     }
     
     /**
