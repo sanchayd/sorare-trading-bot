@@ -8,6 +8,7 @@ import com.sorarebot.notification.NotificationService;
 import com.sorarebot.persistence.CardPreferenceRepository;
 import com.sorarebot.persistence.TransactionRepository;
 import com.sorarebot.persistence.WatchlistRepository;
+import com.sorarebot.security.EmergencyStop;
 
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -16,14 +17,14 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Queue;
+import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import java.util.Queue;
-
 
 /**
  * Core trading engine that implements the trading strategy.
@@ -33,9 +34,6 @@ public class TradingEngine {
     private static final Logger LOGGER = Logger.getLogger(TradingEngine.class.getName());
     private static final BigDecimal MARKUP_PERCENTAGE = new BigDecimal("1.05"); // 5% markup
     private static final BigDecimal MAX_COUNTER_OFFER_DISCOUNT = new BigDecimal("0.95"); // 5% discount for counter offers
-    private final Queue<Instant> recentTransactions = new ConcurrentLinkedQueue<>();
-    private final int maxTransactionsPerHour;
-    private static final Duration TRANSACTION_WINDOW = Duration.ofHours(1);
     
     private final SorareApiClient apiClient;
     private final WatchlistRepository watchlistRepo;
@@ -45,28 +43,45 @@ public class TradingEngine {
     private final ScheduledExecutorService scheduler;
     private final PriceEvaluator priceEvaluator;
     
+    // Transaction rate limiting
+    private final Queue<Instant> recentTransactions = new ConcurrentLinkedQueue<>();
+    private final int maxTransactionsPerHour;
+    private static final Duration TRANSACTION_WINDOW = Duration.ofHours(1);
+    
+    // Emergency stop
+    private final EmergencyStop emergencyStop;
+    
     public TradingEngine(
-        SorareApiClient apiClient, 
-        WatchlistRepository watchlistRepo,
-        TransactionRepository transactionRepo,
-        CardPreferenceRepository cardPreferenceRepo,
-        NotificationService notificationService,
-        int maxTransactionsPerHour) {
-    this.apiClient = apiClient;
-    this.watchlistRepo = watchlistRepo;
-    this.transactionRepo = transactionRepo;
-    this.cardPreferenceRepo = cardPreferenceRepo;
-    this.notificationService = notificationService;
-    this.scheduler = Executors.newScheduledThreadPool(2);
-    this.priceEvaluator = new PriceEvaluator();
-    this.maxTransactionsPerHour = maxTransactionsPerHour;
-}
+            SorareApiClient apiClient, 
+            WatchlistRepository watchlistRepo,
+            TransactionRepository transactionRepo,
+            CardPreferenceRepository cardPreferenceRepo,
+            NotificationService notificationService,
+            int maxTransactionsPerHour,
+            EmergencyStop emergencyStop) {
+        this.apiClient = apiClient;
+        this.watchlistRepo = watchlistRepo;
+        this.transactionRepo = transactionRepo;
+        this.cardPreferenceRepo = cardPreferenceRepo;
+        this.notificationService = notificationService;
+        this.scheduler = Executors.newScheduledThreadPool(2);
+        this.priceEvaluator = new PriceEvaluator();
+        this.maxTransactionsPerHour = maxTransactionsPerHour;
+        this.emergencyStop = emergencyStop;
+    }
     
     /**
      * Start the trading engine.
      * Sets up scheduled tasks for market monitoring and offer processing.
      */
     public void start() {
+        // Check if emergency stop is active before starting
+        if (emergencyStop != null && emergencyStop.isEmergencyStopActive()) {
+            LOGGER.severe("Cannot start trading engine - Emergency stop is active: " + 
+                       emergencyStop.getEmergencyStopReason());
+            return;
+        }
+        
         // Schedule market monitoring every 5 minutes
         scheduler.scheduleAtFixedRate(
                 this::monitorMarket,
@@ -99,6 +114,12 @@ public class TradingEngine {
      * Checks each player on the watchlist for undervalued cards.
      */
     private void monitorMarket() {
+        // Check if emergency stop is active
+        if (emergencyStop != null && emergencyStop.isEmergencyStopActive()) {
+            LOGGER.warning("Market monitoring skipped - Emergency stop is active");
+            return;
+        }
+        
         LOGGER.info("Monitoring market at " + Instant.now());
         
         List<Player> watchlist = watchlistRepo.getWatchlist();
@@ -116,30 +137,36 @@ public class TradingEngine {
             }
         }
     }
-
-    // Add this method to check transaction rate limits
+    
+    /**
+     * Check if a transaction can be executed based on rate limits.
+     * 
+     * @return true if we're within rate limits, false otherwise
+     */
     private boolean canExecuteTransaction() {
         Instant oneHourAgo = Instant.now().minus(TRANSACTION_WINDOW);
-    
+        
         // Remove transactions older than one hour
         while (!recentTransactions.isEmpty() && recentTransactions.peek().isBefore(oneHourAgo)) {
-        recentTransactions.poll();
+            recentTransactions.poll();
         }
-    
+        
         // Check if we're under the limit
         if (recentTransactions.size() < maxTransactionsPerHour) {
-        return true;
+            return true;
         }
-    
+        
         LOGGER.warning("Transaction rate limit reached: " + maxTransactionsPerHour + 
                    " transactions in the last hour. Skipping transaction.");
         return false;
-}
-
-        // Add this method to track executed transactions
-        private void recordTransactionExecution() {
-            recentTransactions.add(Instant.now());
-}
+    }
+    
+    /**
+     * Record a transaction execution for rate limiting.
+     */
+    private void recordTransactionExecution() {
+        recentTransactions.add(Instant.now());
+    }
     
     /**
      * Evaluate a card and execute a trade if it meets criteria.
@@ -158,8 +185,14 @@ public class TradingEngine {
         if (priceEvaluator.isUndervalued(cardPrice, floorPrice)) {
             // First check if we're within rate limits
             if (!canExecuteTransaction()) {
-                LOGGER.info("Skipping potentially undervalued card due to rate limit: " + 
-                           card.getId() + " - Price: " + cardPrice + " ETH, Floor: " + floorPrice + " ETH");
+                LOGGER.info("Skipping undervalued card due to rate limit: " + card.getId() + " - Price: " + 
+                           cardPrice + " ETH, Floor: " + floorPrice + " ETH");
+                return;
+            }
+            
+            // Check if emergency stop is active
+            if (emergencyStop != null && emergencyStop.isEmergencyStopActive()) {
+                LOGGER.warning("Skipping undervalued card due to emergency stop: " + card.getId());
                 return;
             }
             
@@ -174,7 +207,7 @@ public class TradingEngine {
                 // Record the transaction execution for rate limiting
                 recordTransactionExecution();
                 
-                // Record the transaction in the database
+                // Record the transaction
                 transactionRepo.recordPurchase(card.getId(), cardPrice, txHash);
                 
                 // Calculate selling price with 5% markup
@@ -182,8 +215,8 @@ public class TradingEngine {
                 
                 // List the card for sale
                 String listingId = apiClient.listCardForSale(card.getId(), sellingPrice);
-                LOGGER.info("Listed card for sale: " + card.getId() + " - Listing ID: " + 
-                           listingId + " - Price: " + sellingPrice + " ETH");
+                LOGGER.info("Listed card for sale: " + card.getId() + " - Listing ID: " + listingId + 
+                           " - Price: " + sellingPrice + " ETH");
                 
                 // Record the listing
                 transactionRepo.recordListing(card.getId(), sellingPrice, listingId);
@@ -194,31 +227,15 @@ public class TradingEngine {
     }
     
     /**
-     * Check if a card matches any special criteria (jersey mint or favorite serial).
-     * 
-     * @param card The card to check
-     */
-    private void checkForSpecialCard(Card card) {
-        // Check for jersey mint
-        if (cardPreferenceRepo.isJerseyMintEnabled() && card.isJerseyMint()) {
-            // Check if there's a price limit
-            Double maxPrice = cardPreferenceRepo.getJerseyMintMaxPrice();
-            if (maxPrice == null || card.getPrice().compareTo(BigDecimal.valueOf(maxPrice)) <= 0) {
-                notificationService.notifySpecialCard(card, "Jersey mint - " + card.getPlayerJerseyNumber());
-            }
-        }
-        
-        // Check for favorite serial number
-        Set<Integer> favoriteSerials = cardPreferenceRepo.getFavoriteSerials();
-        if (favoriteSerials.contains(card.getSerial())) {
-            notificationService.notifySpecialCard(card, "Favorite serial number - " + card.getSerialString());
-        }
-    }
-    
-    /**
      * Process counter-offers received for our listed cards.
      */
     private void processCounterOffers() {
+        // Check if emergency stop is active
+        if (emergencyStop != null && emergencyStop.isEmergencyStopActive()) {
+            LOGGER.warning("Counter-offer processing skipped - Emergency stop is active");
+            return;
+        }
+        
         LOGGER.info("Processing counter-offers at " + Instant.now());
         
         try {
@@ -250,18 +267,56 @@ public class TradingEngine {
             // Calculate minimum acceptable price (original price + some profit)
             BigDecimal minAcceptablePrice = purchasePrice.multiply(MAX_COUNTER_OFFER_DISCOUNT);
             
+            // Check if emergency stop is active before accepting offer
+            if (emergencyStop != null && emergencyStop.isEmergencyStopActive()) {
+                LOGGER.warning("Skipping offer evaluation due to emergency stop: " + offer.getId());
+                return;
+            }
+            
             // If the offer is acceptable, accept it
             if (offer.getPrice().compareTo(minAcceptablePrice) >= 0) {
+                // Check transaction rate limiting for accepting offers too
+                if (!canExecuteTransaction()) {
+                    LOGGER.info("Skipping acceptable offer due to rate limit: " + offer.getId());
+                    return;
+                }
+                
                 String txHash = apiClient.acceptOffer(offer.getId());
                 LOGGER.info("Accepted offer: " + offer.getId() + " - Transaction: " + txHash);
+                
+                // Record the transaction execution for rate limiting
+                recordTransactionExecution();
                 
                 // Record the sale
                 transactionRepo.recordSale(offer.getCardId(), offer.getPrice(), txHash);
             } else {
-                LOGGER.info("Rejected offer: " + offer.getId() + " - Price too low: " + offer.getPrice() + " ETH (min: " + minAcceptablePrice + " ETH)");
+                LOGGER.info("Rejected offer: " + offer.getId() + " - Price too low: " + 
+                           offer.getPrice() + " ETH (min: " + minAcceptablePrice + " ETH)");
             }
         } catch (IOException e) {
             LOGGER.log(Level.SEVERE, "Error evaluating counter-offer: " + offer.getId(), e);
+        }
+    }
+    
+    /**
+     * Check if a card matches any special criteria (jersey mint or favorite serial).
+     * 
+     * @param card The card to check
+     */
+    private void checkForSpecialCard(Card card) {
+        // Check for jersey mint
+        if (cardPreferenceRepo.isJerseyMintEnabled() && card.isJerseyMint()) {
+            // Check if there's a price limit
+            Double maxPrice = cardPreferenceRepo.getJerseyMintMaxPrice();
+            if (maxPrice == null || card.getPrice().compareTo(BigDecimal.valueOf(maxPrice)) <= 0) {
+                notificationService.notifySpecialCard(card, "Jersey mint - " + card.getPlayerJerseyNumber());
+            }
+        }
+        
+        // Check for favorite serial number
+        Set<Integer> favoriteSerials = cardPreferenceRepo.getFavoriteSerials();
+        if (favoriteSerials.contains(card.getSerial())) {
+            notificationService.notifySpecialCard(card, "Favorite serial number - " + card.getSerialString());
         }
     }
     

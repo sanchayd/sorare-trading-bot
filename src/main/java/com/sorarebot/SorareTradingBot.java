@@ -7,6 +7,7 @@ import com.sorarebot.notification.NotificationService;
 import com.sorarebot.persistence.CardPreferenceRepository;
 import com.sorarebot.persistence.TransactionRepository;
 import com.sorarebot.persistence.WatchlistRepository;
+import com.sorarebot.security.EmergencyStop;
 import com.sorarebot.trading.TradingEngine;
 import org.web3j.crypto.Credentials;
 import org.web3j.crypto.WalletUtils;
@@ -37,7 +38,18 @@ public class SorareTradingBot {
     private final CardPreferenceRepository cardPreferenceRepo;
     private final NotificationService notificationService;
     
+    // Security components
+    private final EmergencyStop emergencyStop;
+    
     public SorareTradingBot(Properties config) throws Exception {
+        // Initialize emergency stop system
+        String emergencyStopDir = config.getProperty("security.emergency.dir", "./security/emergency");
+        long fileCheckIntervalMs = Long.parseLong(
+            config.getProperty("security.emergency.check.interval.ms", "5000"));
+        
+        this.emergencyStop = new EmergencyStop(emergencyStopDir, fileCheckIntervalMs);
+        this.emergencyStop.startFileWatcher();
+        
         // Load Ethereum credentials
         String walletPassword = config.getProperty("wallet.password");
         String walletPath = config.getProperty("wallet.path");
@@ -66,15 +78,21 @@ public class SorareTradingBot {
         
         this.notificationService = new NotificationService(
                 emailAddress, smtpHost, smtpPort, smtpUsername, smtpPassword, enabledEmail);
-
-    // Get transaction rate limit from config
-    int maxTransactionsPerHour = Integer.parseInt(config.getProperty("trading.max.transactions.per.hour", "5"));
-    LOGGER.info("Transaction rate limit: " + maxTransactionsPerHour + " per hour");
-
-
-        // Update the TradingEngine instantiation
-        this.tradingEngine = new TradingEngine(apiClient, watchlistRepo, transactionRepo, cardPreferenceRepo, 
-        notificationService,maxTransactionsPerHour);
+        
+        // Get transaction rate limit from config
+        int maxTransactionsPerHour = Integer.parseInt(
+            config.getProperty("trading.max.transactions.per.hour", "5"));
+        LOGGER.info("Transaction rate limit: " + maxTransactionsPerHour + " per hour");
+        
+        // Initialize trading engine with security components
+        this.tradingEngine = new TradingEngine(
+                apiClient, 
+                watchlistRepo, 
+                transactionRepo, 
+                cardPreferenceRepo, 
+                notificationService,
+                maxTransactionsPerHour,
+                emergencyStop);
     }
     
     /**
@@ -82,12 +100,22 @@ public class SorareTradingBot {
      */
     public void start() {
         try {
+            // Check if emergency stop is active
+            if (emergencyStop.isEmergencyStopActive()) {
+                String reason = emergencyStop.getEmergencyStopReason();
+                LOGGER.severe("Cannot start trading bot - Emergency stop is active: " + reason);
+                System.out.println("EMERGENCY STOP ACTIVE: " + reason);
+                System.out.println("Please resolve the issue and clear the emergency stop before starting.");
+                return;
+            }
+            
             // Check available balance before starting
             BigDecimal balance = blockchainService.getEthBalance();
             LOGGER.info("Current ETH balance: " + balance);
             
             if (balance.compareTo(BigDecimal.valueOf(0.1)) < 0) {
                 LOGGER.warning("Low ETH balance: " + balance + " ETH. Consider adding funds.");
+                System.out.println("WARNING: Low ETH balance: " + balance + " ETH");
             }
             
             // Start the trading engine
@@ -118,6 +146,11 @@ public class SorareTradingBot {
         System.out.println("  serial list                    - List favorite serial numbers");
         System.out.println("  jersey on|off                  - Enable/disable jersey mint notifications");
         System.out.println("  jersey price <eth_amount>      - Set max price for jersey mints (0 for no limit)");
+        System.out.println("  emergency status               - Check emergency stop status");
+        System.out.println("  emergency stop <reason>        - Trigger emergency stop");
+        System.out.println("  emergency clear                - Clear emergency stop");
+        System.out.println("  emergency clear-force          - Force clear emergency stop");
+        System.out.println("  transactions                   - Show recent transactions");
         System.out.println("  quit                           - Exit the program");
         
         while (running) {
@@ -265,6 +298,63 @@ public class SorareTradingBot {
                         }
                         break;
                         
+                    case "emergency":
+                        if (parts.length >= 2) {
+                            switch (parts[1].toLowerCase()) {
+                                case "status":
+                                    boolean isActive = emergencyStop.isEmergencyStopActive();
+                                    System.out.println("Emergency stop: " + (isActive ? "ACTIVE" : "Inactive"));
+                                    if (isActive) {
+                                        String reason = emergencyStop.getEmergencyStopReason();
+                                        System.out.println("Reason: " + reason);
+                                    }
+                                    break;
+                                    
+                                case "stop":
+                                    if (parts.length >= 3) {
+                                        // Combine all remaining parts as the reason
+                                        StringBuilder reasonBuilder = new StringBuilder();
+                                        for (int i = 2; i < parts.length; i++) {
+                                            if (i > 2) reasonBuilder.append(" ");
+                                            reasonBuilder.append(parts[i]);
+                                        }
+                                        
+                                        String reason = reasonBuilder.toString();
+                                        emergencyStop.triggerEmergencyStop(reason);
+                                        System.out.println("Emergency stop triggered: " + reason);
+                                    } else {
+                                        System.out.println("Usage: emergency stop <reason>");
+                                    }
+                                    break;
+                                    
+                                case "clear":
+                                    boolean cleared = emergencyStop.clearEmergencyStop(false);
+                                    if (cleared) {
+                                        System.out.println("Emergency stop cleared successfully");
+                                    } else {
+                                        System.out.println("Failed to clear emergency stop");
+                                        System.out.println("If you're sure it's safe to proceed, use: emergency clear-force");
+                                    }
+                                    break;
+                                    
+                                case "clear-force":
+                                    boolean forcedClear = emergencyStop.clearEmergencyStop(true);
+                                    if (forcedClear) {
+                                        System.out.println("Emergency stop cleared with force");
+                                    } else {
+                                        System.out.println("Failed to clear emergency stop");
+                                    }
+                                    break;
+                                    
+                                default:
+                                    System.out.println("Unknown emergency command: " + parts[1]);
+                                    System.out.println("Valid commands: status, stop, clear, clear-force");
+                            }
+                        } else {
+                            System.out.println("Usage: emergency status|stop|clear|clear-force");
+                        }
+                        break;
+                        
                     case "quit":
                     case "exit":
                         running = false;
@@ -272,7 +362,7 @@ public class SorareTradingBot {
                         
                     default:
                         System.out.println("Unknown command: " + parts[0]);
-                        System.out.println("Commands: add <player_id> <rarity>, remove <player_id>, list, balance, quit");
+                        System.out.println("Type 'help' for a list of commands");
                 }
             } catch (Exception e) {
                 System.out.println("Error: " + e.getMessage());
@@ -291,6 +381,7 @@ public class SorareTradingBot {
         try {
             tradingEngine.stop();
             blockchainService.shutdown();
+            emergencyStop.stopFileWatcher();
             
             LOGGER.info("Trading bot shut down successfully");
         } catch (Exception e) {
