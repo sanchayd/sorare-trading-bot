@@ -2,6 +2,16 @@
 
 An automated bot that monitors the Sorare marketplace for trading opportunities, buys undervalued cards, lists them for sale with a profit margin, and handles counter-offers.
 
+## Features
+
+- 🔍 Market monitoring for undervalued cards
+- 💰 Automated buying and selling with configurable profit margins
+- 📊 Special card notifications (jersey mints, favorite serial numbers)
+- 📩 Email alerts for special cards
+- 🛑 Emergency stop system to instantly halt all trading operations
+- 🕒 Transaction rate limiting to prevent excessive trading
+- 📝 Transaction history tracking
+
 ## Setup Instructions
 
 ### Prerequisites
@@ -21,18 +31,23 @@ An automated bot that monitors the Sorare marketplace for trading opportunities,
    cd sorare-trading-bot
    ```
 
-3. **Configure the bot**
+3. **Create security directories**
+   ```bash
+   mkdir -p security/emergency
+   ```
+
+4. **Configure the bot**
    ```bash
    cp src/main/resources/config.properties ./config.properties
    # Edit config.properties with your settings
    ```
 
-4. **Build the project**
+5. **Build the project**
    ```bash
    mvn clean package
    ```
 
-5. **Run the bot**
+6. **Run the bot**
    ```bash
    java -jar target/sorare-trading-bot-0.1.0-jar-with-dependencies.jar
    ```
@@ -43,7 +58,7 @@ Edit `config.properties` with your settings:
 
 ```properties
 # Ethereum Configuration
-ethereum.node.url=https://mainnet.infura.io/v3/YOUR_INFURA_API_KEY (c)
+ethereum.node.url=https://mainnet.infura.io/v3/YOUR_INFURA_API_KEY
 
 # Wallet Configuration (IMPORTANT: Use a dedicated wallet with limited funds)
 wallet.path=./keystore/your-wallet-file.json
@@ -59,6 +74,11 @@ db.path=./sorarebot.db
 trading.max.eth.per.transaction=0.5
 trading.min.discount.percentage=15
 trading.markup.percentage=5
+trading.max.transactions.per.hour=5
+
+# Security Configuration
+security.emergency.dir=./security/emergency
+security.emergency.check.interval.ms=5000
 
 # Notification Configuration (Optional)
 notification.email=your_email@example.com
@@ -69,7 +89,40 @@ notification.smtp.username=your_email@gmail.com
 notification.smtp.password=your_app_password
 ```
 
-## Customizing the Bot
+## Security Features
+
+### Emergency Stop System
+
+The emergency stop system allows you to immediately halt all trading operations, useful in case of:
+- Unusual market volatility
+- API issues
+- Unexpected bot behavior
+- System maintenance
+
+Emergency stops persist across bot restarts, ensuring trading doesn't resume until explicitly cleared.
+
+Commands:
+```
+emergency status              - Check emergency stop status
+emergency stop <reason>       - Trigger emergency stop
+emergency clear               - Clear emergency stop
+emergency clear-force         - Force clear emergency stop (use with caution)
+```
+
+### Transaction Rate Limiting
+
+The bot implements a sliding-window rate limiter that prevents executing more than a configurable number of transactions per hour. This:
+- Prevents excessive trading during volatile markets
+- Limits potential losses if issues occur
+- Reduces API rate limit issues
+- Provides a more predictable trading pattern
+
+Configure the limit in `config.properties`:
+```properties
+trading.max.transactions.per.hour=5
+```
+
+## Using the Bot
 
 ### Adding Players to Watch
 
@@ -130,6 +183,24 @@ To implement your own custom logic:
    
    Add new commands to `SorareTradingBot.java` in the command line interface section.
 
+## Best Practices
+
+### Security Best Practices
+
+1. **Use Transaction Rate Limiting**: Start conservative with a low limit (3-5 transactions per hour)
+2. **Use a Dedicated Wallet**: Always use a wallet with limited funds for the bot
+3. **Test the Emergency Stop**: Regularly test that the emergency stop works as expected
+4. **Monitor Logs**: Check logs regularly for warnings or errors
+5. **Test on Testnet First**: Use Sepolia or other testnets before deploying to mainnet
+
+### Operational Tips
+
+1. **Start with Small Watchlist**: Begin with a few players you know well
+2. **Conservative Limits**: Use conservative transaction size limits initially
+3. **Regular Backups**: Back up your database regularly
+4. **Update Dependencies**: Keep libraries up-to-date, especially web3j and security components
+5. **Monitor Balance**: Keep track of your wallet balance and ETH prices
+
 ## Testing Before Deployment
 
 1. **Use a testnet first**
@@ -140,19 +211,13 @@ To implement your own custom logic:
 2. **Set conservative limits**
    ```properties
    trading.max.eth.per.transaction=0.05
+   trading.max.transactions.per.hour=3
    ```
 
 3. **Monitor logs**
    ```
    tail -f logs/sorarebot.log
    ```
-
-## Security Considerations
-
-- Use a dedicated Ethereum wallet with limited funds
-- Store your keystore file securely
-- Never commit sensitive information to your repository
-- Test thoroughly on testnet before using real funds
 
 ## Disclaimer
 
