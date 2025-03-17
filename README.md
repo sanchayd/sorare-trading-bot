@@ -6,6 +6,7 @@ An automated bot that monitors the Sorare marketplace for trading opportunities,
 
 - 🔍 Market monitoring for undervalued cards
 - 💰 Automated buying and selling with configurable profit margins
+- ⚡ High-priority player monitoring with historical price-based buying rules
 - 📊 Special card notifications (jersey mints, favorite serial numbers)
 - 📩 Email alerts for special cards
 - 🛑 Emergency stop system to instantly halt all trading operations
@@ -31,9 +32,10 @@ An automated bot that monitors the Sorare marketplace for trading opportunities,
    cd sorare-trading-bot
    ```
 
-3. **Create security directories**
+3. **Create required directories**
    ```bash
    mkdir -p security/emergency
+   mkdir -p data
    ```
 
 4. **Configure the bot**
@@ -80,6 +82,9 @@ trading.max.transactions.per.hour=5
 security.emergency.dir=./security/emergency
 security.emergency.check.interval.ms=5000
 
+# High-Priority Player Settings
+high_priority.players.file=./data/high_priority_players.txt
+
 # Notification Configuration (Optional)
 notification.email=your_email@example.com
 notification.email.enabled=true
@@ -121,6 +126,41 @@ Configure the limit in `config.properties`:
 ```properties
 trading.max.transactions.per.hour=5
 ```
+
+## High-Priority Player Monitoring
+
+The bot includes a special system for monitoring specific players more frequently and using different buying rules:
+
+### Key Features
+- **Separate 5-minute monitoring cycle** for high-priority players
+- **Sales history tracking** for informed buying decisions
+- **Buy when price is below historical average** instead of below floor price
+- **Automatic history building** if no sales data is available yet
+- **Flexible priority list** stored in an easy-to-edit text file
+
+### Configuration
+
+High-priority players are stored in a simple text file:
+```
+# Format: player_id,rarity
+0x123456789abcdef,limited
+0xabcdef123456789,super_rare
+```
+
+Command line management:
+```
+priority add <player_id> <rarity>    - Add a player to high-priority list
+priority remove <player_id>          - Remove a player from high-priority list
+priority list                        - List all high-priority players
+priority history <player_id> <rarity> - View sales history for a player
+```
+
+### How It Works
+
+1. Every 5 minutes, the bot scans the market for your high-priority players
+2. If the lowest current price is below the average of the last 5 sales, it buys the card
+3. The card is listed for sale at either the average price or a 5% markup (whichever is higher)
+4. Each purchase updates the sales history, allowing the system to adapt to market trends
 
 ## Using the Bot
 
@@ -175,14 +215,6 @@ To implement your own custom logic:
    }
    ```
 
-3. **Create a new repository for custom preferences**
-   
-   Create a class similar to `CardPreferenceRepository.java` to store your custom parameters.
-
-4. **Update CLI commands**
-   
-   Add new commands to `SorareTradingBot.java` in the command line interface section.
-
 ## Best Practices
 
 ### Security Best Practices
@@ -193,13 +225,13 @@ To implement your own custom logic:
 4. **Monitor Logs**: Check logs regularly for warnings or errors
 5. **Test on Testnet First**: Use Sepolia or other testnets before deploying to mainnet
 
-### Operational Tips
+### High-Priority Player Tips
 
-1. **Start with Small Watchlist**: Begin with a few players you know well
-2. **Conservative Limits**: Use conservative transaction size limits initially
-3. **Regular Backups**: Back up your database regularly
-4. **Update Dependencies**: Keep libraries up-to-date, especially web3j and security components
-5. **Monitor Balance**: Keep track of your wallet balance and ETH prices
+1. **Start Small**: Begin with just a few high-priority players you know well
+2. **Review Sales History**: Check the price history with `priority history` before buying
+3. **Seed Market Data**: Add known fair prices to start building the history
+4. **Add Top Players**: Target popular players with high trading volume for best results
+5. **Adjust Notification Settings**: Set up alerts to stay informed about high-priority transactions
 
 ## Testing Before Deployment
 
