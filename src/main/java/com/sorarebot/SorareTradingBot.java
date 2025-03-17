@@ -5,6 +5,7 @@ import com.sorarebot.blockchain.BlockchainService;
 import com.sorarebot.model.Player;
 import com.sorarebot.notification.NotificationService;
 import com.sorarebot.persistence.CardPreferenceRepository;
+import com.sorarebot.persistence.HighPriorityPlayerRepository;
 import com.sorarebot.persistence.TransactionRepository;
 import com.sorarebot.persistence.WatchlistRepository;
 import com.sorarebot.security.EmergencyStop;
@@ -18,6 +19,7 @@ import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.List;
 import java.util.Properties;
 import java.util.Scanner;
 import java.util.logging.Level;
@@ -36,6 +38,7 @@ public class SorareTradingBot {
     private final WatchlistRepository watchlistRepo;
     private final TransactionRepository transactionRepo;
     private final CardPreferenceRepository cardPreferenceRepo;
+    private final HighPriorityPlayerRepository highPriorityRepo;
     private final NotificationService notificationService;
     
     // Security components
@@ -68,6 +71,11 @@ public class SorareTradingBot {
         this.transactionRepo = new TransactionRepository(dbPath);
         this.cardPreferenceRepo = new CardPreferenceRepository(dbPath);
         
+        // Initialize high-priority player repository
+        String highPriorityPlayersFile = config.getProperty(
+            "high_priority.players.file", "./data/high_priority_players.txt");
+        this.highPriorityRepo = new HighPriorityPlayerRepository(dbPath, highPriorityPlayersFile);
+        
         // Initialize notification service
         String emailAddress = config.getProperty("notification.email");
         String smtpHost = config.getProperty("notification.smtp.host");
@@ -89,7 +97,8 @@ public class SorareTradingBot {
                 apiClient, 
                 watchlistRepo, 
                 transactionRepo, 
-                cardPreferenceRepo, 
+                cardPreferenceRepo,
+                highPriorityRepo,
                 notificationService,
                 maxTransactionsPerHour,
                 emergencyStop);
@@ -146,6 +155,10 @@ public class SorareTradingBot {
         System.out.println("  serial list                    - List favorite serial numbers");
         System.out.println("  jersey on|off                  - Enable/disable jersey mint notifications");
         System.out.println("  jersey price <eth_amount>      - Set max price for jersey mints (0 for no limit)");
+        System.out.println("  priority add <player_id> <rarity> - Add player to high-priority list");
+        System.out.println("  priority remove <player_id>    - Remove player from high-priority list");
+        System.out.println("  priority list                  - List high-priority players");
+        System.out.println("  priority history <player_id> <rarity> - Show sales history for player");
         System.out.println("  emergency status               - Check emergency stop status");
         System.out.println("  emergency stop <reason>        - Trigger emergency stop");
         System.out.println("  emergency clear                - Clear emergency stop");
@@ -203,156 +216,19 @@ public class SorareTradingBot {
                         break;
                     
                     case "serial":
-                        if (parts.length >= 2) {
-                            switch (parts[1].toLowerCase()) {
-                                case "add":
-                                    if (parts.length >= 3) {
-                                        try {
-                                            int serialNumber = Integer.parseInt(parts[2]);
-                                            String rarity = parts.length >= 4 ? parts[3] : null;
-                                            cardPreferenceRepo.addFavoriteSerial(serialNumber, rarity);
-                                            System.out.println("Added favorite serial number: " + serialNumber + 
-                                                            (rarity != null ? " (Rarity: " + rarity + ")" : ""));
-                                        } catch (NumberFormatException e) {
-                                            System.out.println("Invalid serial number: " + parts[2]);
-                                        }
-                                    } else {
-                                        System.out.println("Usage: serial add <number> [rarity]");
-                                    }
-                                    break;
-                                    
-                                case "remove":
-                                    if (parts.length >= 3) {
-                                        try {
-                                            int serialNumber = Integer.parseInt(parts[2]);
-                                            String rarity = parts.length >= 4 ? parts[3] : null;
-                                            cardPreferenceRepo.removeFavoriteSerial(serialNumber, rarity);
-                                            System.out.println("Removed favorite serial number: " + serialNumber);
-                                        } catch (NumberFormatException e) {
-                                            System.out.println("Invalid serial number: " + parts[2]);
-                                        }
-                                    } else {
-                                        System.out.println("Usage: serial remove <number> [rarity]");
-                                    }
-                                    break;
-                                    
-                                case "list":
-                                    System.out.println("Favorite serial numbers:");
-                                    cardPreferenceRepo.getFavoriteSerials().forEach(serial -> 
-                                        System.out.println("  " + serial));
-                                    break;
-                                    
-                                default:
-                                    System.out.println("Unknown serial command: " + parts[1]);
-                                    System.out.println("Valid commands: serial add, serial remove, serial list");
-                            }
-                        } else {
-                            System.out.println("Usage: serial add|remove|list ...");
-                        }
+                        handleSerialCommands(parts);
                         break;
                         
                     case "jersey":
-                        if (parts.length >= 2) {
-                            switch (parts[1].toLowerCase()) {
-                                case "on":
-                                    cardPreferenceRepo.setJerseyMintEnabled(true);
-                                    System.out.println("Jersey mint notifications enabled");
-                                    break;
-                                    
-                                case "off":
-                                    cardPreferenceRepo.setJerseyMintEnabled(false);
-                                    System.out.println("Jersey mint notifications disabled");
-                                    break;
-                                    
-                                case "price":
-                                    if (parts.length >= 3) {
-                                        try {
-                                            double price = Double.parseDouble(parts[2]);
-                                            if (price <= 0) {
-                                                cardPreferenceRepo.setJerseyMintMaxPrice(null);
-                                                System.out.println("Jersey mint max price: no limit");
-                                            } else {
-                                                cardPreferenceRepo.setJerseyMintMaxPrice(price);
-                                                System.out.println("Jersey mint max price set to: " + price + " ETH");
-                                            }
-                                        } catch (NumberFormatException e) {
-                                            System.out.println("Invalid price: " + parts[2]);
-                                        }
-                                    } else {
-                                        Double currentPrice = cardPreferenceRepo.getJerseyMintMaxPrice();
-                                        System.out.println("Current jersey mint max price: " + 
-                                                         (currentPrice != null ? currentPrice + " ETH" : "no limit"));
-                                    }
-                                    break;
-                                    
-                                default:
-                                    System.out.println("Unknown jersey command: " + parts[1]);
-                                    System.out.println("Valid commands: jersey on, jersey off, jersey price");
-                            }
-                        } else {
-                            boolean enabled = cardPreferenceRepo.isJerseyMintEnabled();
-                            Double maxPrice = cardPreferenceRepo.getJerseyMintMaxPrice();
-                            System.out.println("Jersey mint notifications: " + (enabled ? "enabled" : "disabled"));
-                            System.out.println("Jersey mint max price: " + 
-                                             (maxPrice != null ? maxPrice + " ETH" : "no limit"));
-                        }
+                        handleJerseyCommands(parts);
+                        break;
+                        
+                    case "priority":
+                        handlePriorityCommands(parts);
                         break;
                         
                     case "emergency":
-                        if (parts.length >= 2) {
-                            switch (parts[1].toLowerCase()) {
-                                case "status":
-                                    boolean isActive = emergencyStop.isEmergencyStopActive();
-                                    System.out.println("Emergency stop: " + (isActive ? "ACTIVE" : "Inactive"));
-                                    if (isActive) {
-                                        String reason = emergencyStop.getEmergencyStopReason();
-                                        System.out.println("Reason: " + reason);
-                                    }
-                                    break;
-                                    
-                                case "stop":
-                                    if (parts.length >= 3) {
-                                        // Combine all remaining parts as the reason
-                                        StringBuilder reasonBuilder = new StringBuilder();
-                                        for (int i = 2; i < parts.length; i++) {
-                                            if (i > 2) reasonBuilder.append(" ");
-                                            reasonBuilder.append(parts[i]);
-                                        }
-                                        
-                                        String reason = reasonBuilder.toString();
-                                        emergencyStop.triggerEmergencyStop(reason);
-                                        System.out.println("Emergency stop triggered: " + reason);
-                                    } else {
-                                        System.out.println("Usage: emergency stop <reason>");
-                                    }
-                                    break;
-                                    
-                                case "clear":
-                                    boolean cleared = emergencyStop.clearEmergencyStop(false);
-                                    if (cleared) {
-                                        System.out.println("Emergency stop cleared successfully");
-                                    } else {
-                                        System.out.println("Failed to clear emergency stop");
-                                        System.out.println("If you're sure it's safe to proceed, use: emergency clear-force");
-                                    }
-                                    break;
-                                    
-                                case "clear-force":
-                                    boolean forcedClear = emergencyStop.clearEmergencyStop(true);
-                                    if (forcedClear) {
-                                        System.out.println("Emergency stop cleared with force");
-                                    } else {
-                                        System.out.println("Failed to clear emergency stop");
-                                    }
-                                    break;
-                                    
-                                default:
-                                    System.out.println("Unknown emergency command: " + parts[1]);
-                                    System.out.println("Valid commands: status, stop, clear, clear-force");
-                            }
-                        } else {
-                            System.out.println("Usage: emergency status|stop|clear|clear-force");
-                        }
+                        handleEmergencyCommands(parts);
                         break;
                         
                     case "quit":
@@ -372,6 +248,256 @@ public class SorareTradingBot {
         
         System.out.println("Shutting down...");
         shutdown();
+    }
+    
+    /**
+     * Handle serial number commands.
+     */
+    private void handleSerialCommands(String[] parts) {
+        if (parts.length < 2) {
+            System.out.println("Usage: serial add|remove|list ...");
+            return;
+        }
+        
+        switch (parts[1].toLowerCase()) {
+            case "add":
+                if (parts.length >= 3) {
+                    try {
+                        int serialNumber = Integer.parseInt(parts[2]);
+                        String rarity = parts.length >= 4 ? parts[3] : null;
+                        cardPreferenceRepo.addFavoriteSerial(serialNumber, rarity);
+                        System.out.println("Added favorite serial number: " + serialNumber + 
+                                        (rarity != null ? " (Rarity: " + rarity + ")" : ""));
+                    } catch (NumberFormatException e) {
+                        System.out.println("Invalid serial number: " + parts[2]);
+                    }
+                } else {
+                    System.out.println("Usage: serial add <number> [rarity]");
+                }
+                break;
+                
+            case "remove":
+                if (parts.length >= 3) {
+                    try {
+                        int serialNumber = Integer.parseInt(parts[2]);
+                        String rarity = parts.length >= 4 ? parts[3] : null;
+                        cardPreferenceRepo.removeFavoriteSerial(serialNumber, rarity);
+                        System.out.println("Removed favorite serial number: " + serialNumber);
+                    } catch (NumberFormatException e) {
+                        System.out.println("Invalid serial number: " + parts[2]);
+                    }
+                } else {
+                    System.out.println("Usage: serial remove <number> [rarity]");
+                }
+                break;
+                
+            case "list":
+                System.out.println("Favorite serial numbers:");
+                cardPreferenceRepo.getFavoriteSerials().forEach(serial -> 
+                    System.out.println("  " + serial));
+                break;
+                
+            default:
+                System.out.println("Unknown serial command: " + parts[1]);
+                System.out.println("Valid commands: serial add, serial remove, serial list");
+        }
+    }
+    
+    /**
+     * Handle jersey mint commands.
+     */
+    private void handleJerseyCommands(String[] parts) {
+        if (parts.length < 2) {
+            boolean enabled = cardPreferenceRepo.isJerseyMintEnabled();
+            Double maxPrice = cardPreferenceRepo.getJerseyMintMaxPrice();
+            System.out.println("Jersey mint notifications: " + (enabled ? "enabled" : "disabled"));
+            System.out.println("Jersey mint max price: " + 
+                             (maxPrice != null ? maxPrice + " ETH" : "no limit"));
+            return;
+        }
+        
+        switch (parts[1].toLowerCase()) {
+            case "on":
+                cardPreferenceRepo.setJerseyMintEnabled(true);
+                System.out.println("Jersey mint notifications enabled");
+                break;
+                
+            case "off":
+                cardPreferenceRepo.setJerseyMintEnabled(false);
+                System.out.println("Jersey mint notifications disabled");
+                break;
+                
+            case "price":
+                if (parts.length >= 3) {
+                    try {
+                        double price = Double.parseDouble(parts[2]);
+                        if (price <= 0) {
+                            cardPreferenceRepo.setJerseyMintMaxPrice(null);
+                            System.out.println("Jersey mint max price: no limit");
+                        } else {
+                            cardPreferenceRepo.setJerseyMintMaxPrice(price);
+                            System.out.println("Jersey mint max price set to: " + price + " ETH");
+                        }
+                    } catch (NumberFormatException e) {
+                        System.out.println("Invalid price: " + parts[2]);
+                    }
+                } else {
+                    Double currentPrice = cardPreferenceRepo.getJerseyMintMaxPrice();
+                    System.out.println("Current jersey mint max price: " + 
+                                     (currentPrice != null ? currentPrice + " ETH" : "no limit"));
+                }
+                break;
+                
+            default:
+                System.out.println("Unknown jersey command: " + parts[1]);
+                System.out.println("Valid commands: jersey on, jersey off, jersey price");
+        }
+    }
+    
+    /**
+     * Handle high-priority player commands.
+     */
+    private void handlePriorityCommands(String[] parts) {
+        if (parts.length < 2) {
+            System.out.println("Usage: priority add|remove|list|history ...");
+            return;
+        }
+        
+        switch (parts[1].toLowerCase()) {
+            case "add":
+                if (parts.length >= 4) {
+                    String playerId = parts[2];
+                    String rarity = parts[3];
+                    
+                    boolean added = tradingEngine.addHighPriorityPlayer(playerId, rarity);
+                    if (added) {
+                        System.out.println("Added high-priority player: " + playerId + " (" + rarity + ")");
+                    } else {
+                        System.out.println("Player already in high-priority list: " + playerId);
+                    }
+                } else {
+                    System.out.println("Usage: priority add <player_id> <rarity>");
+                }
+                break;
+                
+            case "remove":
+                if (parts.length >= 3) {
+                    String playerId = parts[2];
+                    
+                    boolean removed = tradingEngine.removeHighPriorityPlayer(playerId);
+                    if (removed) {
+                        System.out.println("Removed high-priority player: " + playerId);
+                    } else {
+                        System.out.println("Player not found in high-priority list: " + playerId);
+                    }
+                } else {
+                    System.out.println("Usage: priority remove <player_id>");
+                }
+                break;
+                
+            case "list":
+                System.out.println("High-priority players:");
+                List<Player> highPriorityPlayers = tradingEngine.getHighPriorityPlayers();
+                if (highPriorityPlayers.isEmpty()) {
+                    System.out.println("  No high-priority players");
+                } else {
+                    highPriorityPlayers.forEach(p -> 
+                        System.out.println("  " + p.getId() + " (" + p.getRarity() + ")"));
+                }
+                break;
+                
+            case "history":
+                if (parts.length >= 4) {
+                    String playerId = parts[2];
+                    String rarity = parts[3];
+                    
+                    List<BigDecimal> salesHistory = tradingEngine.getPlayerSalesHistory(playerId, rarity);
+                    System.out.println("Sales history for " + playerId + " (" + rarity + "):");
+                    
+                    if (salesHistory.isEmpty()) {
+                        System.out.println("  No sales history found");
+                    } else {
+                        BigDecimal sum = BigDecimal.ZERO;
+                        for (int i = 0; i < salesHistory.size(); i++) {
+                            BigDecimal price = salesHistory.get(i);
+                            sum = sum.add(price);
+                            System.out.println("  " + (i + 1) + ". " + price + " ETH");
+                        }
+                        
+                        // Calculate average
+                        BigDecimal average = sum.divide(BigDecimal.valueOf(salesHistory.size()), 6, BigDecimal.ROUND_HALF_UP);
+                        System.out.println("Average: " + average + " ETH");
+                    }
+                } else {
+                    System.out.println("Usage: priority history <player_id> <rarity>");
+                }
+                break;
+                
+            default:
+                System.out.println("Unknown priority command: " + parts[1]);
+                System.out.println("Valid commands: priority add, priority remove, priority list, priority history");
+        }
+    }
+    
+    /**
+     * Handle emergency stop commands.
+     */
+    private void handleEmergencyCommands(String[] parts) {
+        if (parts.length < 2) {
+            System.out.println("Usage: emergency status|stop|clear|clear-force");
+            return;
+        }
+        
+        switch (parts[1].toLowerCase()) {
+            case "status":
+                boolean isActive = emergencyStop.isEmergencyStopActive();
+                System.out.println("Emergency stop: " + (isActive ? "ACTIVE" : "Inactive"));
+                if (isActive) {
+                    String reason = emergencyStop.getEmergencyStopReason();
+                    System.out.println("Reason: " + reason);
+                }
+                break;
+                
+            case "stop":
+                if (parts.length >= 3) {
+                    // Combine all remaining parts as the reason
+                    StringBuilder reasonBuilder = new StringBuilder();
+                    for (int i = 2; i < parts.length; i++) {
+                        if (i > 2) reasonBuilder.append(" ");
+                        reasonBuilder.append(parts[i]);
+                    }
+                    
+                    String reason = reasonBuilder.toString();
+                    emergencyStop.triggerEmergencyStop(reason);
+                    System.out.println("Emergency stop triggered: " + reason);
+                } else {
+                    System.out.println("Usage: emergency stop <reason>");
+                }
+                break;
+                
+            case "clear":
+                boolean cleared = emergencyStop.clearEmergencyStop(false);
+                if (cleared) {
+                    System.out.println("Emergency stop cleared successfully");
+                } else {
+                    System.out.println("Failed to clear emergency stop");
+                    System.out.println("If you're sure it's safe to proceed, use: emergency clear-force");
+                }
+                break;
+                
+            case "clear-force":
+                boolean forcedClear = emergencyStop.clearEmergencyStop(true);
+                if (forcedClear) {
+                    System.out.println("Emergency stop cleared with force");
+                } else {
+                    System.out.println("Failed to clear emergency stop");
+                }
+                break;
+                
+            default:
+                System.out.println("Unknown emergency command: " + parts[1]);
+                System.out.println("Valid commands: status, stop, clear, clear-force");
+        }
     }
     
     /**

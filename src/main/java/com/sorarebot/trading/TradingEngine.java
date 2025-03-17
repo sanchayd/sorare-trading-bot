@@ -6,6 +6,7 @@ import com.sorarebot.model.Offer;
 import com.sorarebot.model.Player;
 import com.sorarebot.notification.NotificationService;
 import com.sorarebot.persistence.CardPreferenceRepository;
+import com.sorarebot.persistence.HighPriorityPlayerRepository;
 import com.sorarebot.persistence.TransactionRepository;
 import com.sorarebot.persistence.WatchlistRepository;
 import com.sorarebot.security.EmergencyStop;
@@ -39,6 +40,7 @@ public class TradingEngine {
     private final WatchlistRepository watchlistRepo;
     private final TransactionRepository transactionRepo;
     private final CardPreferenceRepository cardPreferenceRepo;
+    private final HighPriorityPlayerRepository highPriorityRepo;
     private final NotificationService notificationService;
     private final ScheduledExecutorService scheduler;
     private final PriceEvaluator priceEvaluator;
@@ -56,6 +58,7 @@ public class TradingEngine {
             WatchlistRepository watchlistRepo,
             TransactionRepository transactionRepo,
             CardPreferenceRepository cardPreferenceRepo,
+            HighPriorityPlayerRepository highPriorityRepo,
             NotificationService notificationService,
             int maxTransactionsPerHour,
             EmergencyStop emergencyStop) {
@@ -63,8 +66,9 @@ public class TradingEngine {
         this.watchlistRepo = watchlistRepo;
         this.transactionRepo = transactionRepo;
         this.cardPreferenceRepo = cardPreferenceRepo;
+        this.highPriorityRepo = highPriorityRepo;
         this.notificationService = notificationService;
-        this.scheduler = Executors.newScheduledThreadPool(2);
+        this.scheduler = Executors.newScheduledThreadPool(3); // Increased thread pool for high-priority monitoring
         this.priceEvaluator = new PriceEvaluator();
         this.maxTransactionsPerHour = maxTransactionsPerHour;
         this.emergencyStop = emergencyStop;
@@ -82,7 +86,7 @@ public class TradingEngine {
             return;
         }
         
-        // Schedule market monitoring every 5 minutes
+        // Schedule regular market monitoring every 5 minutes
         scheduler.scheduleAtFixedRate(
                 this::monitorMarket,
                 0,
@@ -95,6 +99,14 @@ public class TradingEngine {
                 this::processCounterOffers,
                 2,
                 30,
+                TimeUnit.MINUTES
+        );
+        
+        // Schedule high-priority player monitoring every 5 minutes
+        scheduler.scheduleAtFixedRate(
+                this::monitorHighPriorityPlayers,
+                1, // Start after 1 minute to stagger with regular monitoring
+                5,
                 TimeUnit.MINUTES
         );
         
@@ -126,6 +138,11 @@ public class TradingEngine {
         
         for (Player player : watchlist) {
             try {
+                // Skip high-priority players, they are handled separately
+                if (highPriorityRepo.isHighPriorityPlayer(player.getId())) {
+                    continue;
+                }
+                
                 List<Card> availableCards = apiClient.getPlayerListings(player.getId());
                 BigDecimal floorPrice = apiClient.getFloorPrice(player.getId(), player.getRarity());
                 
@@ -135,6 +152,141 @@ public class TradingEngine {
             } catch (IOException e) {
                 LOGGER.log(Level.SEVERE, "Error monitoring player: " + player.getName(), e);
             }
+        }
+    }
+    
+    /**
+     * Monitor high-priority players using special buying rules.
+     * Buys cards if they are below the average of the last 5 sales.
+     */
+    private void monitorHighPriorityPlayers() {
+        // Check if emergency stop is active
+        if (emergencyStop != null && emergencyStop.isEmergencyStopActive()) {
+            LOGGER.warning("High-priority player monitoring skipped - Emergency stop is active");
+            return;
+        }
+        
+        LOGGER.info("Monitoring high-priority players at " + Instant.now());
+        
+        List<Player> highPriorityPlayers = highPriorityRepo.getHighPriorityPlayers();
+        
+        if (highPriorityPlayers.isEmpty()) {
+            LOGGER.info("No high-priority players to monitor");
+            return;
+        }
+        
+        for (Player player : highPriorityPlayers) {
+            try {
+                List<Card> availableCards = apiClient.getPlayerListings(player.getId());
+                
+                if (availableCards.isEmpty()) {
+                    LOGGER.info("No cards available for high-priority player: " + player.getId());
+                    continue;
+                }
+                
+                // Get the average of last 5 sales for this player
+                BigDecimal averageSalePrice = highPriorityRepo.getAverageLastSalesPrice(
+                    player.getId(), player.getRarity(), 5);
+                
+                // If we don't have enough sales history, use floor price as fallback
+                if (averageSalePrice == null) {
+                    BigDecimal floorPrice = apiClient.getFloorPrice(player.getId(), player.getRarity());
+                    
+                    // Record the floor price as a "sale" to start building history
+                    highPriorityRepo.addSaleRecord(player.getId(), player.getRarity(), floorPrice);
+                    
+                    LOGGER.info("Not enough sales history for " + player.getId() + 
+                               ", using floor price: " + floorPrice);
+                    
+                    // Use standard evaluation for now
+                    for (Card card : availableCards) {
+                        evaluateAndTrade(card, floorPrice);
+                    }
+                    continue;
+                }
+                
+                LOGGER.info("Average sales price for " + player.getId() + ": " + averageSalePrice);
+                
+                // Find the lowest priced card
+                Card lowestPricedCard = null;
+                for (Card card : availableCards) {
+                    if (lowestPricedCard == null || card.getPrice().compareTo(lowestPricedCard.getPrice()) < 0) {
+                        lowestPricedCard = card;
+                    }
+                }
+                
+                // Special high-priority buying rule: Buy if price is below average of last 5 sales
+                if (lowestPricedCard != null && 
+                    lowestPricedCard.getPrice().compareTo(averageSalePrice) < 0) {
+                    LOGGER.info("Found high-priority card below average sales price: " + 
+                               lowestPricedCard.getId() + " - Price: " + lowestPricedCard.getPrice() + 
+                               " ETH, Average: " + averageSalePrice + " ETH");
+                    
+                    // Use a special method for high-priority purchases
+                    buyHighPriorityCard(lowestPricedCard, averageSalePrice);
+                    
+                    // Record the purchase price as a "sale" to update history
+                    highPriorityRepo.addSaleRecord(
+                        player.getId(), player.getRarity(), lowestPricedCard.getPrice());
+                }
+            } catch (IOException e) {
+                LOGGER.log(Level.SEVERE, "Error monitoring high-priority player: " + player.getId(), e);
+            }
+        }
+    }
+    
+    /**
+     * Buy a high-priority card and list it for sale.
+     * 
+     * @param card The card to buy
+     * @param averageSalePrice The average sale price, used for listing
+     */
+    private void buyHighPriorityCard(Card card, BigDecimal averageSalePrice) {
+        // First check if we're within rate limits
+        if (!canExecuteTransaction()) {
+            LOGGER.info("Skipping high-priority card due to rate limit: " + card.getId());
+            return;
+        }
+        
+        // Check emergency stop
+        if (emergencyStop != null && emergencyStop.isEmergencyStopActive()) {
+            LOGGER.warning("Skipping high-priority card due to emergency stop: " + card.getId());
+            return;
+        }
+        
+        try {
+            // Buy the card
+            String txHash = apiClient.submitBuyOffer(card.getId(), card.getPrice());
+            LOGGER.info("Bought high-priority card: " + card.getId() + " - Transaction: " + txHash);
+            
+            // Record the transaction execution for rate limiting
+            recordTransactionExecution();
+            
+            // Record the transaction
+            transactionRepo.recordPurchase(card.getId(), card.getPrice(), txHash);
+            
+            // Special case: List at average sale price or 5% markup, whichever is higher
+            BigDecimal markupPrice = card.getPrice().multiply(MARKUP_PERCENTAGE)
+                                    .setScale(6, RoundingMode.HALF_UP);
+            BigDecimal listPrice = markupPrice.max(averageSalePrice);
+            
+            // List the card for sale
+            String listingId = apiClient.listCardForSale(card.getId(), listPrice);
+            LOGGER.info("Listed high-priority card for sale: " + card.getId() + 
+                       " - Listing ID: " + listingId + " - Price: " + listPrice + " ETH");
+            
+            // Record the listing
+            transactionRepo.recordListing(card.getId(), listPrice, listingId);
+            
+            // Notify about the purchase
+            try {
+                notificationService.notifySpecialCard(card, 
+                    "High-priority card purchased below average sales price! Listed for " + listPrice + " ETH");
+            } catch (Exception e) {
+                LOGGER.log(Level.WARNING, "Failed to send notification for high-priority card", e);
+            }
+        } catch (IOException e) {
+            LOGGER.log(Level.SEVERE, "Error buying high-priority card: " + card.getId(), e);
         }
     }
     
@@ -209,6 +361,12 @@ public class TradingEngine {
                 
                 // Record the transaction
                 transactionRepo.recordPurchase(card.getId(), cardPrice, txHash);
+                
+                // If this is a high-priority player, record the purchase as a "sale" for history
+                if (highPriorityRepo.isHighPriorityPlayer(card.getPlayerId())) {
+                    highPriorityRepo.addSaleRecord(
+                        card.getPlayerId(), card.getRarity(), cardPrice);
+                }
                 
                 // Calculate selling price with 5% markup
                 BigDecimal sellingPrice = cardPrice.multiply(MARKUP_PERCENTAGE).setScale(6, RoundingMode.HALF_UP);
@@ -289,6 +447,13 @@ public class TradingEngine {
                 
                 // Record the sale
                 transactionRepo.recordSale(offer.getCardId(), offer.getPrice(), txHash);
+                
+                // If this is a card for a high-priority player, record the sale for history
+                Card card = apiClient.getCardById(offer.getCardId());
+                if (card != null && highPriorityRepo.isHighPriorityPlayer(card.getPlayerId())) {
+                    highPriorityRepo.addSaleRecord(
+                        card.getPlayerId(), card.getRarity(), offer.getPrice());
+                }
             } else {
                 LOGGER.info("Rejected offer: " + offer.getId() + " - Price too low: " + 
                            offer.getPrice() + " ETH (min: " + minAcceptablePrice + " ETH)");
@@ -318,6 +483,20 @@ public class TradingEngine {
         if (favoriteSerials.contains(card.getSerial())) {
             notificationService.notifySpecialCard(card, "Favorite serial number - " + card.getSerialString());
         }
+        
+        // Check if this is a high-priority player with a good price
+        if (highPriorityRepo.isHighPriorityPlayer(card.getPlayerId())) {
+            // Get the average sales price
+            BigDecimal averageSalePrice = highPriorityRepo.getAverageLastSalesPrice(
+                card.getPlayerId(), card.getRarity(), 5);
+                
+            // If we have sales history and price is below average, notify
+            if (averageSalePrice != null && card.getPrice().compareTo(averageSalePrice) < 0) {
+                notificationService.notifySpecialCard(card, 
+                    "High-priority player card below average sales price! Current: " + 
+                    card.getPrice() + " ETH, Average: " + averageSalePrice + " ETH");
+            }
+        }
     }
     
     /**
@@ -338,6 +517,47 @@ public class TradingEngine {
     public void removeFromWatchlist(String playerId) {
         watchlistRepo.removeFromWatchlist(playerId);
         LOGGER.info("Removed player from watchlist: " + playerId);
+    }
+    
+    /**
+     * Add a player to the high-priority list.
+     * 
+     * @param playerId The player ID to add
+     * @param rarity The rarity to monitor
+     * @return true if added, false if already exists
+     */
+    public boolean addHighPriorityPlayer(String playerId, String rarity) {
+        return highPriorityRepo.addHighPriorityPlayer(playerId, rarity);
+    }
+    
+    /**
+     * Remove a player from the high-priority list.
+     * 
+     * @param playerId The player ID to remove
+     * @return true if removed, false if not found
+     */
+    public boolean removeHighPriorityPlayer(String playerId) {
+        return highPriorityRepo.removeHighPriorityPlayer(playerId);
+    }
+    
+    /**
+     * Get the list of high-priority players.
+     * 
+     * @return List of high-priority players
+     */
+    public List<Player> getHighPriorityPlayers() {
+        return highPriorityRepo.getHighPriorityPlayers();
+    }
+    
+    /**
+     * Get sales history for a high-priority player.
+     * 
+     * @param playerId The player ID to get history for
+     * @param rarity The rarity to get history for
+     * @return List of sales prices
+     */
+    public List<BigDecimal> getPlayerSalesHistory(String playerId, String rarity) {
+        return highPriorityRepo.getPlayerSalesHistory(playerId, rarity);
     }
     
     /**
