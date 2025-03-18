@@ -178,6 +178,8 @@ public class HighPriorityPlayerRepository {
      * @param salePrice The sale price
      */
     public void addSaleRecord(String playerId, String rarity, BigDecimal salePrice) {
+        LOGGER.debug("Adding sale record for " + playerId + " (" + rarity + "): " + salePrice + " ETH");
+        
         String sql = "INSERT INTO player_sales_history (player_id, rarity, sale_price) VALUES (?, ?, ?)";
         
         try (Connection conn = DriverManager.getConnection(dbUrl);
@@ -187,10 +189,14 @@ public class HighPriorityPlayerRepository {
             pstmt.setString(2, rarity);
             pstmt.setBigDecimal(3, salePrice);
             
-            pstmt.executeUpdate();
+            int rows = pstmt.executeUpdate();
+            LOGGER.debug("Inserted " + rows + " rows for sale record");
             
             // Delete older records if there are more than 5
-            pruneOldRecords(conn, playerId, rarity);
+            int prunedCount = pruneOldRecords(conn, playerId, rarity);
+            if (prunedCount > 0) {
+                LOGGER.debug("Pruned " + prunedCount + " old sale records for " + playerId);
+            }
             
             LOGGER.info("Added sale record for " + playerId + " (" + rarity + "): " + salePrice);
         } catch (SQLException e) {
@@ -200,8 +206,10 @@ public class HighPriorityPlayerRepository {
     
     /**
      * Keep only the most recent 5 sale records for a player.
+     * 
+     * @return Number of records pruned
      */
-    private void pruneOldRecords(Connection conn, String playerId, String rarity) throws SQLException {
+    private int pruneOldRecords(Connection conn, String playerId, String rarity) throws SQLException {
         String sql = "DELETE FROM player_sales_history WHERE id IN (" +
                      "SELECT id FROM player_sales_history " +
                      "WHERE player_id = ? AND rarity = ? " +
@@ -213,9 +221,7 @@ public class HighPriorityPlayerRepository {
             pstmt.setString(2, rarity);
             
             int rowsDeleted = pstmt.executeUpdate();
-            if (rowsDeleted > 0) {
-                LOGGER.info("Pruned " + rowsDeleted + " old sale records for " + playerId);
-            }
+            return rowsDeleted;
         }
     }
     
@@ -231,6 +237,9 @@ public class HighPriorityPlayerRepository {
         if (count <= 0 || count > 5) {
             throw new IllegalArgumentException("Count must be between 1 and 5");
         }
+        
+        LOGGER.debug("Fetching average of last " + count + " sales for player: " + playerId + 
+                   " (" + rarity + ")");
         
         String sql = "SELECT sale_price FROM player_sales_history " +
                      "WHERE player_id = ? AND rarity = ? " +
@@ -251,6 +260,12 @@ public class HighPriorityPlayerRepository {
                 }
             }
             
+            // Debug log the retrieved prices
+            if (!prices.isEmpty()) {
+                LOGGER.debug("Retrieved " + prices.size() + " sale prices for " + playerId + ": " + 
+                           prices.toString());
+            }
+            
             // Check if we have enough sales
             if (prices.size() < count) {
                 LOGGER.info("Not enough sales for " + playerId + " (" + rarity + "): " + 
@@ -264,7 +279,10 @@ public class HighPriorityPlayerRepository {
                 sum = sum.add(price);
             }
             
-            return sum.divide(BigDecimal.valueOf(prices.size()), 6, RoundingMode.HALF_UP);
+            BigDecimal average = sum.divide(BigDecimal.valueOf(prices.size()), 6, RoundingMode.HALF_UP);
+            LOGGER.debug("Calculated average price for " + playerId + ": " + average + " ETH");
+            
+            return average;
         } catch (SQLException e) {
             LOGGER.log(Level.SEVERE, "Error getting average sales price", e);
             return null;

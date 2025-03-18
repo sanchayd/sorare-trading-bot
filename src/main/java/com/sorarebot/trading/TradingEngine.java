@@ -26,6 +26,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
 
 /**
  * Core trading engine that implements the trading strategy.
@@ -175,6 +176,9 @@ public class TradingEngine {
             return;
         }
         
+        LOGGER.debug("Monitoring " + highPriorityPlayers.size() + " high-priority players: " + 
+                    highPriorityPlayers.stream().map(p -> p.getId()).collect(Collectors.joining(", ")));
+        
         for (Player player : highPriorityPlayers) {
             try {
                 List<Card> availableCards = apiClient.getPlayerListings(player.getId());
@@ -184,9 +188,25 @@ public class TradingEngine {
                     continue;
                 }
                 
+                LOGGER.debug("Found " + availableCards.size() + " available cards for high-priority player: " + 
+                            player.getId() + ", lowest price: " + 
+                            availableCards.stream()
+                                .map(Card::getPrice)
+                                .min(BigDecimal::compareTo)
+                                .orElse(BigDecimal.ZERO));
+                
                 // Get the average of last 5 sales for this player
                 BigDecimal averageSalePrice = highPriorityRepo.getAverageLastSalesPrice(
                     player.getId(), player.getRarity(), 5);
+                
+                // Debug log the result of averageSalePrice
+                if (averageSalePrice != null) {
+                    LOGGER.debug("Average sales price for " + player.getId() + " (" + player.getRarity() + "): " + 
+                               averageSalePrice + " ETH");
+                } else {
+                    LOGGER.debug("No sales history found for " + player.getId() + " (" + player.getRarity() + 
+                               "), will use floor price");
+                }
                 
                 // If we don't have enough sales history, use floor price as fallback
                 if (averageSalePrice == null) {
@@ -255,6 +275,15 @@ public class TradingEngine {
         }
         
         try {
+            // Calculate profit potential
+            BigDecimal potentialProfit = averageSalePrice.subtract(card.getPrice());
+            BigDecimal profitPercentage = potentialProfit.divide(card.getPrice(), 4, RoundingMode.HALF_UP)
+                                       .multiply(BigDecimal.valueOf(100));
+            
+            LOGGER.debug("High-priority purchase calculation: Buy price: " + card.getPrice() + 
+                       " ETH, Average: " + averageSalePrice + " ETH, Potential profit: " + 
+                       potentialProfit + " ETH (" + profitPercentage + "%)");
+            
             // Buy the card
             String txHash = apiClient.submitBuyOffer(card.getId(), card.getPrice());
             LOGGER.info("Bought high-priority card: " + card.getId() + " - Transaction: " + txHash);
@@ -299,9 +328,14 @@ public class TradingEngine {
         Instant oneHourAgo = Instant.now().minus(TRANSACTION_WINDOW);
         
         // Remove transactions older than one hour
+        int beforeSize = recentTransactions.size();
         while (!recentTransactions.isEmpty() && recentTransactions.peek().isBefore(oneHourAgo)) {
             recentTransactions.poll();
         }
+        int afterSize = recentTransactions.size();
+        
+        LOGGER.debug("Transaction rate check: removed " + (beforeSize - afterSize) + 
+                    " expired transactions, " + afterSize + "/" + maxTransactionsPerHour + " in current window");
         
         // Check if we're under the limit
         if (recentTransactions.size() < maxTransactionsPerHour) {
@@ -333,8 +367,16 @@ public class TradingEngine {
         // Get the card's price
         BigDecimal cardPrice = card.getPrice();
         
+        // Debug log price evaluation
+        LOGGER.debug("Evaluating card: " + card.getId() + " - Player: " + card.getPlayerId() + 
+                    " - Price: " + cardPrice + " ETH, Floor: " + floorPrice + " ETH, " +
+                    "Threshold: " + floorPrice.multiply(PriceEvaluator.SIGNIFICANT_DISCOUNT) + " ETH");
+        
         // Check if the card is significantly undervalued
         if (priceEvaluator.isUndervalued(cardPrice, floorPrice)) {
+            LOGGER.debug("Card is undervalued: " + card.getId() + " - " + 
+                        cardPrice + " ETH < " + floorPrice.multiply(PriceEvaluator.SIGNIFICANT_DISCOUNT) + " ETH");
+            
             // First check if we're within rate limits
             if (!canExecuteTransaction()) {
                 LOGGER.info("Skipping undervalued card due to rate limit: " + card.getId() + " - Price: " + 
@@ -381,6 +423,9 @@ public class TradingEngine {
             } catch (IOException e) {
                 LOGGER.log(Level.SEVERE, "Error trading card: " + card.getId(), e);
             }
+        } else {
+            LOGGER.debug("Card is not undervalued: " + card.getId() + " - " + 
+                        cardPrice + " ETH >= " + floorPrice.multiply(PriceEvaluator.SIGNIFICANT_DISCOUNT) + " ETH");
         }
     }
     
@@ -424,6 +469,10 @@ public class TradingEngine {
             
             // Calculate minimum acceptable price (original price + some profit)
             BigDecimal minAcceptablePrice = purchasePrice.multiply(MAX_COUNTER_OFFER_DISCOUNT);
+            
+            LOGGER.debug("Evaluating offer: " + offer.getId() + " for card: " + offer.getCardId() + 
+                       " - Offer: " + offer.getPrice() + " ETH, Purchase price: " + purchasePrice + 
+                       " ETH, Min acceptable: " + minAcceptablePrice + " ETH");
             
             // Check if emergency stop is active before accepting offer
             if (emergencyStop != null && emergencyStop.isEmergencyStopActive()) {
@@ -564,7 +613,7 @@ public class TradingEngine {
      * Inner class for evaluating card prices.
      */
     private static class PriceEvaluator {
-        private static final BigDecimal SIGNIFICANT_DISCOUNT = new BigDecimal("0.85"); // 15% below floor
+        public static final BigDecimal SIGNIFICANT_DISCOUNT = new BigDecimal("0.85"); // 15% below floor
         
         /**
          * Determine if a card is significantly undervalued.
@@ -577,8 +626,24 @@ public class TradingEngine {
             // Calculate the threshold price (85% of floor price)
             BigDecimal thresholdPrice = floorPrice.multiply(SIGNIFICANT_DISCOUNT);
             
+            // Calculate discount percentage for logging
+            BigDecimal discount = floorPrice.subtract(cardPrice);
+            BigDecimal discountPercentage = BigDecimal.ZERO;
+            if (floorPrice.compareTo(BigDecimal.ZERO) > 0) {
+                discountPercentage = discount.divide(floorPrice, 4, RoundingMode.HALF_UP)
+                                  .multiply(BigDecimal.valueOf(100));
+            }
+            
             // Card is undervalued if its price is below the threshold
-            return cardPrice.compareTo(thresholdPrice) < 0;
+            boolean result = cardPrice.compareTo(thresholdPrice) < 0;
+            
+            if (result) {
+                LOGGER.debug("Price evaluation: Card price " + cardPrice + " ETH is " + 
+                           discountPercentage + "% below floor price " + floorPrice + 
+                           " ETH (threshold: " + thresholdPrice + " ETH) - UNDERVALUED");
+            }
+            
+            return result;
         }
     }
 }
