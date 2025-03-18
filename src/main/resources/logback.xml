@@ -1,3 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
 <configuration>
   <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
     <encoder>
@@ -18,10 +19,36 @@
     </encoder>
   </appender>
   
+  <!-- Debug log file that captures only DEBUG level messages -->
+  <appender name="DEBUG_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+    <file>logs/debug.log</file>
+    <filter class="ch.qos.logback.classic.filter.LevelFilter">
+      <level>DEBUG</level>
+      <onMatch>ACCEPT</onMatch>
+      <onMismatch>DENY</onMismatch>
+    </filter>
+    <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+      <fileNamePattern>logs/debug-%d{yyyy-MM-dd}.%i.log</fileNamePattern>
+      <maxFileSize>20MB</maxFileSize>
+      <maxHistory>3</maxHistory>
+      <totalSizeCap>200MB</totalSizeCap>
+    </rollingPolicy>
+    <encoder>
+      <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+    </encoder>
+  </appender>
+  
+  <!-- Set default log level (change to DEBUG to enable debug logs globally) -->
   <root level="info">
     <appender-ref ref="CONSOLE" />
     <appender-ref ref="FILE" />
+    <appender-ref ref="DEBUG_FILE" />
   </root>
+  
+  <!-- Enable debug logs for specific packages -->
+  <logger name="com.sorarebot.trading" level="info" />
+  <logger name="com.sorarebot.persistence" level="info" />
+  <logger name="com.sorarebot.security" level="info" />
   
   <!-- Reduce verbosity of web3j logs -->
   <logger name="org.web3j" level="warn" />
