@@ -132,7 +132,7 @@ trading.max.transactions.per.hour=5
 The bot includes a special system for monitoring specific players more frequently and using different buying rules:
 
 ### Key Features
-- **Separate 5-minute monitoring cycle** for high-priority players
+- **Separate 15-minute monitoring cycle** for high-priority players
 - **Sales history tracking** for informed buying decisions
 - **Buy when price is below historical average** instead of below floor price
 - **Automatic history building** if no sales data is available yet

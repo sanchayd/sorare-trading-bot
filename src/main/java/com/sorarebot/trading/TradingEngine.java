@@ -102,11 +102,11 @@ public class TradingEngine {
                 TimeUnit.MINUTES
         );
         
-        // Schedule high-priority player monitoring every 5 minutes
+        // Schedule high-priority player monitoring every 15 minutes
         scheduler.scheduleAtFixedRate(
                 this::monitorHighPriorityPlayers,
                 1, // Start after 1 minute to stagger with regular monitoring
-                5,
+                15,
                 TimeUnit.MINUTES
         );
         
@@ -166,7 +166,7 @@ public class TradingEngine {
             return;
         }
         
-        LOGGER.info("Monitoring high-priority players at " + Instant.now());
+        LOGGER.info("Monitoring high-priority players at " + Instant.now() + " (15-minute cycle)");
         
         List<Player> highPriorityPlayers = highPriorityRepo.getHighPriorityPlayers();
         
